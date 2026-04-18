@@ -11,6 +11,7 @@ Usage:
 """
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -18,10 +19,18 @@ import sys
 SUPPORTED_CUDA = ["12.5", "12.4", "12.3", "12.2", "12.1"]
 WHEEL_BASE_URL = "https://abetlen.github.io/llama-cpp-python/whl"
 
+VCVARSALL_CANDIDATES = [
+    r"C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvarsall.bat",
+    r"C:\Program Files\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvarsall.bat",
+    r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat",
+    r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat",
+    r"C:\Program Files (x86)\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat",
+    r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat",
+]
+
 
 def get_cuda_version() -> str | None:
     """Detect installed CUDA version from nvcc or nvidia-smi."""
-    # Try nvcc first (more reliable)
     try:
         result = subprocess.run(
             ["nvcc", "--version"],
@@ -36,7 +45,6 @@ def get_cuda_version() -> str | None:
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
 
-    # Try nvidia-smi as fallback
     try:
         result = subprocess.run(
             ["nvidia-smi"],
@@ -45,7 +53,6 @@ def get_cuda_version() -> str | None:
             timeout=10,
         )
         if result.returncode == 0:
-            # nvidia-smi shows "CUDA Version: X.Y"
             match = re.search(r"CUDA Version:\s*(\d+\.\d+)", result.stdout)
             if match:
                 return match.group(1)
@@ -64,11 +71,9 @@ def find_compatible_cuda(detected: str) -> str | None:
     major = int(major_minor[0])
     minor = int(major_minor[1])
 
-    # Only CUDA 12.x wheels are available
     if major != 12:
         return None
 
-    # Find the highest compatible version <= detected
     for cuda_ver in SUPPORTED_CUDA:
         ver_parts = cuda_ver.split(".")
         ver_minor = int(ver_parts[1])
@@ -78,31 +83,77 @@ def find_compatible_cuda(detected: str) -> str | None:
     return None
 
 
+def get_msvc_env() -> dict | None:
+    """Source vcvarsall.bat and return the resulting environment variables."""
+    for vcvarsall in VCVARSALL_CANDIDATES:
+        if not os.path.exists(vcvarsall):
+            continue
+        print(f"Found MSVC at: {vcvarsall}")
+        result = subprocess.run(
+            f'"{vcvarsall}" x64 && set',
+            shell=True,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            continue
+        env = {}
+        for line in result.stdout.splitlines():
+            if "=" in line:
+                k, _, v = line.partition("=")
+                env[k.strip()] = v.strip()
+        return env
+    return None
+
+
 def install_llama_cpp(cuda_version: str | None = None, force_cpu: bool = False) -> bool:
     """Install llama-cpp-python with appropriate GPU/CPU support."""
+    env = os.environ.copy()
+
     if force_cpu:
         print("Installing CPU version (forced)...")
-        cmd = [sys.executable, "-m", "pip", "install", "--force-reinstall", "llama-cpp-python"]
+        cmd = [sys.executable, "-m", "pip", "install", "--force-reinstall", "--no-cache-dir", "llama-cpp-python"]
     elif cuda_version:
         cuda_tag = f"cu{cuda_version.replace('.', '')}"
         wheel_url = f"{WHEEL_BASE_URL}/{cuda_tag}"
+        cuda_root = f"C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v{cuda_version}"
+        nvcc = os.path.join(cuda_root, "bin", "nvcc.exe")
+
         print(f"Installing GPU version for CUDA {cuda_version}...")
+
+        msvc_env = get_msvc_env()
+        if msvc_env:
+            print("MSVC environment loaded.")
+            env.update(msvc_env)
+        else:
+            print("Warning: could not find vcvarsall.bat — C compiler may not be found.")
+
+        env["CUDA_PATH"] = cuda_root
+        env["CUDA_HOME"] = cuda_root
+        env["PATH"] = os.path.join(cuda_root, "bin") + ";" + env.get("PATH", "")
+
+        cmake_args = f'-DGGML_CUDA=on -DCMAKE_CUDA_COMPILER="{nvcc}" -DCMAKE_CUDA_FLAGS=--allow-unsupported-compiler -G Ninja'
+        env["CMAKE_ARGS"] = cmake_args
+        env["FORCE_CMAKE"] = "1"
+        print(f"CMAKE_ARGS={cmake_args}")
+
         cmd = [
             sys.executable,
             "-m",
             "pip",
             "install",
             "--force-reinstall",
+            "--no-cache-dir",
             "llama-cpp-python",
             "--extra-index-url",
             wheel_url,
         ]
     else:
         print("Installing CPU version (no compatible CUDA found)...")
-        cmd = [sys.executable, "-m", "pip", "install", "--force-reinstall", "llama-cpp-python"]
+        cmd = [sys.executable, "-m", "pip", "install", "--force-reinstall", "--no-cache-dir", "llama-cpp-python"]
 
     print(f"Running: {' '.join(cmd)}")
-    result = subprocess.run(cmd)
+    result = subprocess.run(cmd, env=env)
     return result.returncode == 0
 
 
@@ -128,7 +179,6 @@ def main():
             print(f"Supported versions: {', '.join(SUPPORTED_CUDA)}")
         success = install_llama_cpp(cuda_version=args.cuda)
     else:
-        # Auto-detect
         detected = get_cuda_version()
         if detected:
             print(f"Detected CUDA version: {detected}")
@@ -147,7 +197,6 @@ def main():
 
     if success:
         print("\n✓ Installation complete!")
-        # Verify
         try:
             from omnilex.llm import has_cuda_support
 

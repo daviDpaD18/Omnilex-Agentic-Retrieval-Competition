@@ -227,26 +227,40 @@ def download_lexam(output_dir: Path, filter_by_corpus: bool = False) -> None:
         random.seed(42)
         random.shuffle(all_with_citations)
 
-        # Assign enumerated IDs (train_0001, train_0002, etc.)
-        for i, item in enumerate(all_with_citations, start=1):
-            item["query_id"] = f"train_{i:04d}"
+        # 70/30 train/val split
+        split_idx = int(len(all_with_citations) * 0.7)
+        train_entries = all_with_citations[:split_idx]
+        val_entries = all_with_citations[split_idx:]
 
-        # Save as single train.csv
-        csv_path = lexam_dir / "train.csv"
-        with open(csv_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=["query_id", "query", "gold_citations"])
-            writer.writeheader()
-            for item in all_with_citations:
-                writer.writerow(
-                    {
-                        "query_id": item["query_id"],
-                        "query": item["query"],
-                        "gold_citations": item["gold_citations"],
-                    }
-                )
+        for i, item in enumerate(train_entries, start=1):
+            item["query_id"] = f"train_{i:04d}"
+        for i, item in enumerate(val_entries, start=1):
+            item["query_id"] = f"val_{i:04d}"
+
+        def write_csv(path, entries):
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=["query_id", "query", "gold_citations"])
+                writer.writeheader()
+                for item in entries:
+                    writer.writerow(
+                        {
+                            "query_id": item["query_id"],
+                            "query": item["query"],
+                            "gold_citations": item["gold_citations"],
+                        }
+                    )
+
+        write_csv(lexam_dir / "train.csv", train_entries)
+        write_csv(lexam_dir / "val.csv", val_entries)
+
+        # Also copy val.csv to data root for notebooks
+        import shutil
+        shutil.copy(lexam_dir / "val.csv", output_dir / "val.csv")
+        shutil.copy(lexam_dir / "train.csv", output_dir / "train.csv")
 
         print(f"\nLEXam saved to {lexam_dir}")
-        print(f"  - train.csv: {len(all_with_citations)} entries with citations")
+        print(f"  - train.csv: {len(train_entries)} entries")
+        print(f"  - val.csv: {len(val_entries)} entries")
 
     except Exception as e:
         print(f"Warning: Could not download LEXam: {e}")
@@ -261,7 +275,7 @@ def download_swiss_citations(output_dir: Path) -> None:
     print("\nDownloading Swiss citation dataset...")
 
     try:
-        dataset = load_dataset("rcds/swiss_citation_extraction")
+        dataset = load_dataset("rcds/swiss_citation_extraction", trust_remote_code=True)
 
         for split_name in dataset.keys():
             split_data = dataset[split_name]
